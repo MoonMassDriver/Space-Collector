@@ -1,0 +1,291 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Space Factory - Fixed Controls</title>
+    <style>
+        body {
+            margin: 0; padding: 0; background: black; height: 100vh;
+            overflow: hidden; font-family: 'Courier New', Courier, monospace;
+            color: white; touch-action: none; display: flex; flex-direction: column;
+        }
+        #game-area {
+            position: relative; width: 100%; height: 65vh;
+            max-width: 420px; margin: 0 auto;
+        }
+        #canvas { width: 100%; height: 100%; background: black; display: block; }
+        #controls-area {
+            flex: 1; display: flex; flex-direction: row; justify-content: space-around;
+            align-items: center; background: rgba(0,0,0,0.6); padding: 20px; box-sizing: border-box;
+        }
+        #joystick-base {
+            position: relative; width: 110px; height: 110px;
+            background: rgba(0, 221, 255, 0.05); border: 2px solid #00DDFF44; border-radius: 50%;
+            touch-action: none;
+        }
+        #joystick-stick {
+            position: absolute; width: 45px; height: 45px;
+            background: rgba(0, 221, 255, 0.2); border: 3px solid #00DDFF;
+            border-radius: 50%; top: 50%; left: 50%; transform: translate(-50%, -50%);
+            box-shadow: 0 0 14px #00DDFF44; pointer-events: none;
+        }
+        #ui-overlay { position: absolute; inset: 0; pointer-events: none; z-index: 5; }
+        #status {
+            position: absolute; top: 10px; left: 10px; right: 10px;
+            display: flex; justify-content: space-between; font-size: 16px;
+        }
+        #level-display { position: absolute; top: 35px; left: 10px; color: #00DDFF; }
+        #fire-btn {
+            width: 75px; height: 75px; background: rgba(255, 215, 0, 0.15);
+            border: 3px solid #888; color: #888; font-size: 18px; font-weight: bold;
+            display: flex; align-items: center; justify-content: center; border-radius: 18px;
+            user-select: none; opacity: 0.5; pointer-events: none;
+            touch-action: none; /* Prevents zoom */
+        }
+        #fire-btn.charged {
+            border: 3px solid #FFFF00; color: #FFFF00; background: rgba(255, 215, 0, 0.35);
+            box-shadow: 0 0 20px #FFFF00; opacity: 1; pointer-events: auto;
+        }
+        #reset-btn {
+            width: 75px; height: 36px; background: linear-gradient(#FF0044, #CC0033);
+            color: white; font-size: 13px; font-weight: bold; border: none;
+            border-radius: 10px; cursor: pointer;
+        }
+    </style>
+</head>
+<body>
+    <div id="game-area">
+        <canvas id="canvas"></canvas>
+        <div id="ui-overlay">
+            <div id="status">
+                <div id="damage-display">Damage: -----</div>
+                <div id="score-display">Cargo: 0/10</div>
+            </div>
+            <div id="level-display">Level: 1</div>
+        </div>
+    </div>
+
+    <div id="controls-area">
+        <div id="joystick-base"><div id="joystick-stick"></div></div>
+        <div id="fire-btn">FIRE</div>
+        <button id="reset-btn">RESET</button>
+    </div>
+
+    <script>
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        const fireBtn = document.getElementById('fire-btn');
+        const stick = document.getElementById('joystick-stick');
+        const base = document.getElementById('joystick-base');
+
+        function resize() { canvas.width = canvas.clientWidth; canvas.height = canvas.clientHeight; }
+        window.addEventListener('resize', resize);
+        resize();
+
+        // --- SOUNDS RESTORED ---
+        const sounds = {
+            intake: new Audio('http://soundimage.org/wp-content/uploads/2016/04/PowerRez1.mp3'),
+            hit: new Audio('http://soundimage.org/wp-content/uploads/2016/04/Explosion3.mp3'),
+            gameover: new Audio('http://soundimage.org/wp-content/uploads/2016/04/DroneAlert1.mp3'),
+            win: new Audio('http://soundimage.org/wp-content/uploads/2016/04/PowerRez3.mp3')
+        };
+
+        function playSound(type) {
+            if (sounds[type]) {
+                sounds[type].currentTime = 0;
+                sounds[type].play().catch(() => {});
+            }
+        }
+
+        // --- PREVENT ZOOM ---
+        document.addEventListener('touchstart', (e) => {
+            if (e.touches.length > 1) e.preventDefault();
+        }, { passive: false });
+
+        // --- JOYSTICK ---
+        let joystickActive = false;
+        let moveVector = { x: 0, y: 0 };
+        const maxRadius = 45;
+
+        base.addEventListener('touchstart', (e) => { joystickActive = true; handleMove(e); }, {passive: false});
+        window.addEventListener('touchmove', handleMove, {passive: false});
+        window.addEventListener('touchend', () => {
+            joystickActive = false; moveVector = { x: 0, y: 0 };
+            stick.style.transform = `translate(-50%, -50%)`;
+        });
+
+        function handleMove(e) {
+            if (!joystickActive) return;
+            const touch = e.touches[0];
+            const rect = base.getBoundingClientRect();
+            const dx = touch.clientX - (rect.left + rect.width / 2);
+            const dy = touch.clientY - (rect.top + rect.height / 2);
+            const dist = Math.hypot(dx, dy);
+            const limitedX = dist > maxRadius ? dx * (maxRadius / dist) : dx;
+            const limitedY = dist > maxRadius ? dy * (maxRadius / dist) : dy;
+            moveVector.x = limitedX / maxRadius;
+            moveVector.y = limitedY / maxRadius;
+            stick.style.transform = `translate(calc(-50% + ${limitedX}px), calc(-50% + ${limitedY}px))`;
+        }
+
+        // --- GAME STATE ---
+        let currentLevel = 1;
+        let ship = { x: 0, y: 0, size: 26, speed: 2.2, lightUpTimer: 0, flashTimer: 0, charged: false, color: '#00DDFF' };
+        let objects = [], stars = [], shockwave = null;
+        let score = 0, damage = 0, gameOver = false, levelComplete = false;
+        const WIN_SCORE = 10, MAX_DAMAGE = 5;
+
+        function resetGame(fullReset = true) {
+            if(fullReset) { currentLevel = 1; damage = 0; }
+            ship.x = canvas.width / 2 - 13; ship.y = canvas.height / 2 - 13;
+            ship.charged = false; ship.color = '#00DDFF';
+            fireBtn.classList.remove('charged');
+            objects = []; shockwave = null; score = 0; levelComplete = false;
+            stars = Array.from({length: 30}, () => ({ x: Math.random() * canvas.width, y: Math.random() * canvas.height }));
+            updateUI();
+        }
+
+        function generateJaggedPoints(size) {
+            return Array.from({length: 8}, (_, i) => {
+                const angle = (Math.PI * 2 / 8) * i;
+                const r = size * (0.6 + Math.random() * 0.4);
+                return {x: Math.cos(angle) * r, y: Math.sin(angle) * r};
+            });
+        }
+
+        function spawnObject() {
+            const levelMultiplier = Math.pow(1.3, currentLevel - 1);
+            if (objects.length >= Math.floor(6 * levelMultiplier) || Math.random() > (0.12 * levelMultiplier)) return;
+            const isCargo = Math.random() < 0.35;
+            const speed = 1.088 * Math.pow(1.2, currentLevel - 1);
+            const obj = {
+                x: 0, y: 0, size: 13, dx: 0, dy: 0,
+                type: isCargo ? 'cargo' : 'rock',
+                color: isCargo ? '#00FF88' : '#AAAAAA',
+                points: !isCargo ? generateJaggedPoints(6.5) : null
+            };
+            const side = Math.floor(Math.random() * 3);
+            if (side === 0) { obj.x = Math.random() * canvas.width; obj.y = canvas.height + 15; obj.dy = -speed; }
+            else if (side === 1) { obj.x = -15; obj.y = Math.random() * canvas.height; obj.dx = speed; }
+            else { obj.x = canvas.width + 15; obj.y = Math.random() * canvas.height; obj.dx = -speed; }
+            objects.push(obj);
+        }
+
+        function fireShockwave() {
+            if (!ship.charged || gameOver || levelComplete) return;
+            ship.charged = false; ship.color = '#00DDFF'; 
+            fireBtn.classList.remove('charged');
+            playSound('hit'); // Re-using hit sound for blast
+            shockwave = { x: ship.x + 13, y: ship.y + 13, radius: 0, maxRadius: 100, speed: 8 };
+        }
+
+        function updateUI() {
+            document.getElementById('damage-display').innerHTML = 'Damage: ' + '█'.repeat(damage) + '-'.repeat(MAX_DAMAGE - damage);
+            document.getElementById('score-display').innerHTML = `Cargo: ${score}/${WIN_SCORE}`;
+            document.getElementById('level-display').innerHTML = `Level: ${currentLevel}`;
+        }
+
+        function update() {
+            if (gameOver || levelComplete) return;
+
+            ship.x += moveVector.x * ship.speed; ship.y += moveVector.y * ship.speed;
+            ship.x = Math.max(0, Math.min(canvas.width - ship.size, ship.x));
+            ship.y = Math.max(0, Math.min(canvas.height - ship.size, ship.y));
+
+            spawnObject();
+
+            for (let i = objects.length - 1; i >= 0; i--) {
+                const obj = objects[i];
+                obj.x += (obj.dx || 0); obj.y += (obj.dy || 0);
+
+                const dist = Math.hypot((ship.x + 13) - (obj.x + 6.5), (ship.y + 13) - (obj.y + 6.5));
+                if (dist < 19.5) {
+                    if (obj.type === 'cargo') {
+                        score++; ship.charged = true; ship.color = '#FFFF00';
+                        fireBtn.classList.add('charged'); ship.lightUpTimer = 40;
+                        objects.splice(i, 1); playSound('intake'); updateUI();
+                        if (score >= WIN_SCORE) {
+                            levelComplete = true; playSound('win');
+                            setTimeout(() => { 
+                                if(currentLevel < 3) { currentLevel++; resetGame(false); }
+                                else { gameOver = true; alert("Victory!"); }
+                            }, 2000);
+                        }
+                    } else {
+                        damage++; ship.color = '#FF3333'; ship.flashTimer = 28;
+                        objects.splice(i, 1); playSound('hit'); updateUI();
+                        if (damage >= MAX_DAMAGE) { gameOver = true; playSound('gameover'); }
+                    }
+                }
+                if (obj.x < -60 || obj.x > canvas.width + 60 || obj.y < -60 || obj.y > canvas.height + 60) objects.splice(i, 1);
+            }
+
+            if (shockwave) {
+                shockwave.radius += shockwave.speed;
+                if (shockwave.radius > shockwave.maxRadius) shockwave = null;
+                else {
+                    objects.forEach((obj, idx) => {
+                        if (obj.type === 'rock' && Math.hypot(shockwave.x - (obj.x + 6.5), shockwave.y - (obj.y + 6.5)) < shockwave.radius) {
+                            objects.splice(idx, 1); playSound('hit');
+                        }
+                    });
+                }
+            }
+            stars.forEach(s => { s.y -= 0.425; if (s.y < 0) s.y = canvas.height; });
+            if (ship.lightUpTimer > 0) ship.lightUpTimer--;
+            if (ship.flashTimer > 0) { ship.flashTimer--; if (ship.flashTimer <= 0) ship.color = '#00DDFF'; }
+        }
+
+        function draw() {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            ctx.fillStyle = 'rgba(255,255,255,0.7)';
+            stars.forEach(s => ctx.fillRect(s.x, s.y, 1.5, 1.5));
+
+            ctx.save(); ctx.translate(ship.x + 13, ship.y + 13);
+            ctx.fillStyle = ship.color; ctx.beginPath(); ctx.arc(0, 0, 11, 0, Math.PI*2); ctx.fill();
+            ctx.strokeStyle = '#00FFCC'; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(0, 0, 9, 0, Math.PI*2); ctx.stroke();
+            ctx.fillStyle = ship.lightUpTimer > 0 ? '#FF88FF' : '#0088FF';
+            ctx.beginPath(); ctx.arc(0, 0, 6, 0, Math.PI*2); ctx.fill();
+            if (ship.charged) {
+                ctx.shadowBlur = 15; ctx.shadowColor = 'yellow'; ctx.fillStyle = 'rgba(255,255,0,0.2)';
+                ctx.beginPath(); ctx.arc(0, 0, 13, 0, Math.PI*2); ctx.fill(); ctx.shadowBlur = 0;
+            }
+            ctx.restore();
+
+            objects.forEach(obj => {
+                ctx.fillStyle = obj.color;
+                if (obj.type === 'rock') {
+                    ctx.beginPath(); obj.points.forEach((p, i) => {
+                        const px = obj.x + 6.5 + p.x, py = obj.y + 6.5 + p.y;
+                        if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+                    });
+                    ctx.fill();
+                } else {
+                    ctx.fillRect(obj.x, obj.y, 13, 13);
+                    ctx.fillStyle = 'rgba(255,255,255,0.3)'; ctx.fillRect(obj.x+2, obj.y+2, 9, 4);
+                }
+            });
+
+            if (shockwave) {
+                ctx.strokeStyle = 'white'; ctx.lineWidth = 3; ctx.beginPath();
+                ctx.arc(shockwave.x, shockwave.y, shockwave.radius, 0, Math.PI*2); ctx.stroke();
+            }
+
+            if (gameOver && damage >= MAX_DAMAGE) {
+                ctx.fillStyle = '#FF4444'; ctx.textAlign = 'center'; ctx.font = 'bold 30px Courier';
+                ctx.fillText('GAME OVER', canvas.width/2, canvas.height/2);
+            } else if (levelComplete) {
+                ctx.fillStyle = '#00DDFF'; ctx.textAlign = 'center'; ctx.font = 'bold 24px Courier';
+                ctx.fillText(`LEVEL ${currentLevel} COMPLETE`, canvas.width/2, canvas.height/2);
+            }
+        }
+
+        fireBtn.addEventListener('touchstart', (e) => { e.preventDefault(); fireShockwave(); }, { passive: false });
+        document.getElementById('reset-btn').addEventListener('click', () => resetGame(true));
+
+        function loop() { update(); draw(); requestAnimationFrame(loop); }
+        resetGame(); loop();
+    </script>
+</body>
+</html>
